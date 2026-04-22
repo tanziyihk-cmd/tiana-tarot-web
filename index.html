@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Tiana's Tarot | 504-project</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <style>
+        :root { --gold: #ffd700; --purple: #ba68c8; --bg: #050208; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: var(--bg); color: white; font-family: 'Cinzel', serif; overflow: hidden; }
+        #output_canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; filter: brightness(0.3); opacity: 0.8; z-index: 1; transform: scaleX(-1); }
+        .overlay { position: relative; z-index: 10; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        
+        .deck-view { display: flex; align-items: center; justify-content: center; height: 450px; width: 100vw; perspective: 2000px; position: relative; }
+        .card-box { position: absolute; width: 180px; height: 300px; transition: transform 0.6s cubic-bezier(0.1, 0.9, 0.2, 1), opacity 0.5s; transform-style: preserve-3d; opacity: 0; }
+        .card-inner { width: 100%; height: 100%; position: relative; transform-style: preserve-3d; transition: transform 0s cubic-bezier(0.4, 0, 0.2, 1); }
+        .card-inner.flipped { transform: rotateY(180deg); }
+        
+        .card-face { position: absolute; width: 100%; height: 100%; backface-visibility: hidden; border: 2px solid var(--gold); border-radius: 15px; box-shadow: 0 0 20px rgba(0,0,0,0.8); }
+        .card-back { background: #1a0a2a; display: flex; align-items: center; justify-content: center; border-color: #4a1a6a; }
+        .card-back::after { content: "✧"; font-size: 50px; color: var(--gold); text-shadow: 0 0 15px var(--gold); }
+        .card-front { transform: rotateY(180deg); background-size: cover; background-position: center; background-color: #2a1a3a; }
+        
+        .card-box.picked { 
+            transform: translate(0, 0) scale(1.5) translateZ(600px) !important; 
+            opacity: 1 !important;
+            z-index: 1000 !important; 
+            box-shadow: 0 0 100px var(--gold);
+        }
+
+        .dialog-box { position: absolute; bottom: 30px; width: 85%; max-width: 900px; background: rgba(10, 5, 20, 0.95); border: 1px solid var(--gold); padding: 30px; border-radius: 20px; box-shadow: 0 0 40px rgba(0,0,0,1); backdrop-filter: blur(20px); max-height: 40vh; overflow-y: auto; }
+        #status-text { font-size: 1.15rem; line-height: 1.8; color: #f0f0f0; margin: 0; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+    <video id="input_video" style="display:none"></video>
+    <canvas id="output_canvas"></canvas>
+    <div class="overlay">
+        <h1 style="color:var(--gold); letter-spacing: 8px; text-shadow: 0 0 20px var(--purple); margin-top:-50px;">TIANA'S ASTRAL TAROT</h1>
+        <div class="deck-view" id="deck"></div>
+        <div class="dialog-box"><div id="status-text">✦ 正在接收宇宙信号... ✦</div></div>
+    </div>
+
+    <script>
+        const DEEPSEEK_API_KEY = 'sk-17f8e0b546af4812bcdd29db4890569f';
+        const IMG_PATH = 'assets/'; 
+        const STATE = { SPREAD: 1, PICKED: 2, REVEALED: 3 };
+        let curState = STATE.SPREAD;
+        let isProcessing = false;
+
+        let tarotData = [];
+        for (let i = 0; i <= 21; i++) {
+            let n = i < 10 ? '0'+i : i;
+            tarotData.push({ name: `大阿卡纳 ${n}`, img: `${IMG_PATH}ar${n}.jpg` });
+        }
+        const suites = [{p:'cu',l:'圣杯'},{p:'pe',l:'钱币'},{p:'st',l:'权杖'},{p:'sw',l:'宝剑'}];
+        suites.forEach(s => {
+            for(let i=2; i<=10; i++){
+                let n = i<10 ? '0'+i : i;
+                tarotData.push({ name: `${s.l}${i}`, img: `${IMG_PATH}${s.p}${n}.jpg` });
+            }
+            ['ac','pa','kn','qu','ki'].forEach(suffix => {
+                tarotData.push({ name: `${s.l}${suffix}`, img: `${IMG_PATH}${s.p}${suffix}.jpg` });
+            });
+        });
+
+        const deckEl = document.getElementById('deck');
+        tarotData.forEach((d, i) => {
+            const card = document.createElement('div');
+            card.className = 'card-box';
+            card.id = `card-${i}`;
+            card.innerHTML = `<div class="card-inner"><div class="card-face card-back"></div><div class="card-face card-front" style="background-image: url('${d.img}')"></div></div>`;
+            deckEl.appendChild(card);
+        });
+
+        let targetIdx = 39, currentIdx = 39;
+
+        function updatePhysics() {
+            if (curState === STATE.SPREAD) {
+                currentIdx += (targetIdx - currentIdx) * 0.015; // 物理移动提速
+            }
+            document.querySelectorAll('.card-box').forEach((c, i) => {
+                if (curState >= STATE.PICKED) {
+                    if (i === Math.round(targetIdx)) {
+                        c.classList.add('picked');
+                    } else {
+                        c.style.opacity = 0;
+                    }
+                    return;
+                }
+                const dist = i - currentIdx;
+                c.style.transform = `translateX(${dist * 200}px) translateZ(${-Math.abs(dist) * 180}px) rotateY(${dist * -18}deg)`;
+                c.style.opacity = Math.abs(dist) > 3.5 ? 0 : 1;
+            });
+            requestAnimationFrame(updatePhysics);
+        }
+
+        const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.8 });
+        
+        hands.onResults(results => {
+            const cvs = document.getElementById('output_canvas');
+            const ctx = cvs.getContext('2d');
+            cvs.width = window.innerWidth; cvs.height = window.innerHeight;
+            ctx.save(); ctx.translate(cvs.width, 0); ctx.scale(-1, 1);
+            ctx.drawImage(results.image, 0, 0, cvs.width, cvs.height);
+            
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const lm = results.multiHandLandmarks[0];
+                const fingerDist = Math.hypot(lm[8].x - lm[0].x, lm[8].y - lm[0].y);
+                const tipDist = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+
+                if (tipDist < 0.04 && curState === STATE.REVEALED) location.reload();
+
+                if (curState === STATE.SPREAD) {
+                    targetIdx = lm[9].x * 77;
+                    document.getElementById('status-text').innerText = "✦ 检索命运... 握紧拳头锁定。";
+                    if (fingerDist < 0.18) { 
+                        curState = STATE.PICKED;
+                        targetIdx = Math.max(0, Math.min(77, Math.round(targetIdx)));
+                        currentIdx = targetIdx;
+                    }
+                } 
+                else if (curState === STATE.PICKED && !isProcessing) {
+                    document.getElementById('status-text').innerText = "✦ 契约已成。请张开手掌... ✦";
+                    if (fingerDist > 0.4) { 
+                        isProcessing = true;
+                        curState = STATE.REVEALED;
+                        const el = document.querySelector(`#card-${targetIdx} .card-inner`);
+                        if(el) {
+                            el.classList.add('flipped');
+                            // 提速：翻转开始后0ms 立即请求 API
+                            setTimeout(() => { fetchInterpretation(); }, 0);
+                        }
+                    }
+                }
+                drawConnectors(ctx, lm, HAND_CONNECTIONS, {color: '#ffd700', lineWidth: 2});
+            }
+            ctx.restore();
+        });
+
+        async function fetchInterpretation() {
+            const name = tarotData[targetIdx].name;
+            const status = document.getElementById('status-text');
+            status.innerHTML = `✦ Tiana 正在窥探星辰轨迹...`;
+            try {
+                const r = await fetch('https://api.deepseek.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${DEEPSEEK_API_KEY}` },
+                    body: JSON.stringify({
+                        model: "deepseek-chat",
+                        messages: [{
+                        role: "system", 
+                        content: "你叫Tiana。给一段150字以内的精准占卜解读。要求：言简意赅，直击重点，分神秘意涵、未来启示两部分。最后提醒比👌重置。"
+     },
+                 {
+                        role: "user", 
+                        content: `我抽到了：${name}`
+                        }]                    })
+                });
+                const d = await r.json();
+                status.innerText = d.choices[0].message.content;
+            } catch (e) { status.innerText = "✦ 信号波动。请按 👌 重置。"; }
+        }
+
+        new Camera(document.getElementById('input_video'), {
+            onFrame: async () => { await hands.send({image: document.getElementById('input_video')}); },
+            width: 1280, height: 720
+        }).start();
+        requestAnimationFrame(updatePhysics);
+    </script>
+</body>
+</html>
